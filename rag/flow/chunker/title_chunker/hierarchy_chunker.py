@@ -14,6 +14,7 @@
 #  limitations under the License.
 
 from rag.flow.chunker.title_chunker.common import (
+    BODY_LEVEL,
     BaseTitleChunker,
     resolve_target_level,
 )
@@ -74,6 +75,22 @@ class _ChunkNode:
             child._dfs(chunk_paths, path_titles, depth, include_heading_content)
 
 
+def _open_headings(records, levels):
+    """Return the headings still open at the end of a text run.
+
+    Keeps the last heading of each level, dropping any that a later heading
+    of the same or a higher level closed.
+    """
+    open_headings = []
+    for record, level in zip(records, levels):
+        if not 0 < level < BODY_LEVEL:
+            continue
+        while open_headings and open_headings[-1][1] >= level:
+            open_headings.pop()
+        open_headings.append((record, level))
+    return open_headings
+
+
 class HierarchyTitleChunker(BaseTitleChunker):
     start_message = "Start to merge hierarchically."
 
@@ -81,11 +98,19 @@ class HierarchyTitleChunker(BaseTitleChunker):
         return self.resolve_title_levels(line_records)
 
     def build_chunks(self, line_records, resolved):
+        # A media record does not close the section around it: after each
+        # flush the open heading chain is carried into the next run, so body
+        # text after an image/table keeps its ancestor path. The first
+        # ``carried`` records of a run are those headings. Path indexes are in
+        # document order, so a path ending below ``carried`` holds only
+        # headings the previous run already emitted, and is skipped.
         record_groups = []
         text_records = []
         text_levels = []
+        carried = 0
 
         def flush_text_records():
+            nonlocal carried
             if not text_records:
                 return
 
@@ -101,10 +126,12 @@ class HierarchyTitleChunker(BaseTitleChunker):
                         target_level,
                         self.param.include_heading_content,
                     )
-                    if path
+                    if path and path[-1] >= carried
                 )
-            text_records.clear()
-            text_levels.clear()
+            open_headings = _open_headings(text_records, text_levels)
+            text_records[:] = [record for record, _ in open_headings]
+            text_levels[:] = [level for _, level in open_headings]
+            carried = len(open_headings)
 
         for record, level in zip(line_records, resolved["levels"]):
             if record["doc_type_kwd"] == "text":
